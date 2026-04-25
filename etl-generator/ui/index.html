@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ETL Generator</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css">
+    <style>
+        :root {
+            --bg: #0f1720;
+            --panel: #16212d;
+            --panel-alt: #1b2938;
+            --border: #2c4156;
+            --text: #edf4ff;
+            --muted: #9fb1c5;
+            --accent: #56c2ff;
+            --accent-strong: #2aa8f2;
+            --success: #34d399;
+            --warning: #fbbf24;
+            --error: #f87171;
+            --shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+            --mono: "Cascadia Code", "Fira Code", Consolas, monospace;
+            --sans: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background:
+                radial-gradient(circle at top left, rgba(86, 194, 255, 0.18), transparent 28%),
+                radial-gradient(circle at bottom right, rgba(42, 168, 242, 0.14), transparent 24%),
+                linear-gradient(180deg, #0b1118, #111b26 48%, #0d141c);
+            color: var(--text);
+            font-family: var(--sans);
+        }
+
+        .shell {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 32px 20px 24px;
+        }
+
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: end;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .title {
+            margin: 0;
+            font-size: clamp(32px, 4vw, 48px);
+            letter-spacing: 0.04em;
+        }
+
+        .subtitle {
+            margin-top: 8px;
+            color: var(--muted);
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.18em;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(320px, 430px) minmax(0, 1fr);
+            gap: 20px;
+        }
+
+        .panel {
+            background: linear-gradient(180deg, rgba(27, 41, 56, 0.94), rgba(18, 29, 39, 0.96));
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+
+        .panel-inner {
+            padding: 22px;
+        }
+
+        .section-title {
+            margin: 0 0 16px;
+            font-size: 14px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.14em;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 13px;
+            color: var(--muted);
+        }
+
+        textarea,
+        select,
+        input {
+            width: 100%;
+            border: 1px solid #30475e;
+            border-radius: 14px;
+            background: rgba(10, 18, 25, 0.9);
+            color: var(--text);
+            padding: 14px 15px;
+            font: inherit;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        textarea {
+            min-height: 220px;
+            resize: vertical;
+        }
+
+        textarea:focus,
+        select:focus,
+        input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 4px rgba(86, 194, 255, 0.12);
+        }
+
+        .field {
+            margin-bottom: 16px;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-top: 18px;
+        }
+
+        button {
+            border: 0;
+            border-radius: 14px;
+            padding: 12px 18px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: transform 0.15s ease, opacity 0.15s ease, background 0.15s ease;
+        }
+
+        button:hover {
+            transform: translateY(-1px);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .primary {
+            background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+            color: #06131c;
+        }
+
+        .secondary {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .status-inline {
+            display: none;
+            align-items: center;
+            gap: 10px;
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .status-inline.visible {
+            display: inline-flex;
+        }
+
+        .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.18);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .result-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 16px;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 999px;
+            padding: 8px 12px;
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--muted);
+        }
+
+        .badge.pending {
+            color: var(--warning);
+            background: rgba(251, 191, 36, 0.12);
+        }
+
+        .badge.processing {
+            color: var(--accent);
+            background: rgba(86, 194, 255, 0.12);
+        }
+
+        .badge.done {
+            color: var(--success);
+            background: rgba(52, 211, 153, 0.12);
+        }
+
+        .badge.error {
+            color: var(--error);
+            background: rgba(248, 113, 113, 0.12);
+        }
+
+        .code-panel {
+            border: 1px solid rgba(255, 255, 255, 0.07);
+            border-radius: 16px;
+            overflow: hidden;
+            background: #11161c;
+        }
+
+        .CodeMirror {
+            height: 480px;
+            font-family: var(--mono);
+            font-size: 14px;
+        }
+
+        .result-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 14px;
+            flex-wrap: wrap;
+        }
+
+        .output {
+            margin-top: 18px;
+            padding: 16px;
+            min-height: 120px;
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(8, 13, 19, 0.82);
+            color: var(--muted);
+            font-family: var(--mono);
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .output.error {
+            color: var(--error);
+            border-color: rgba(248, 113, 113, 0.28);
+        }
+
+        .hint {
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        @media (max-width: 980px) {
+            .layout {
+                grid-template-columns: 1fr;
+            }
+
+            .CodeMirror {
+                height: 380px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <header class="topbar">
+            <div>
+                <h1 class="title">ETL Generator</h1>
+                <div class="subtitle">Powered by GigaChat</div>
+            </div>
+        </header>
+
+        <main class="layout">
+            <section class="panel">
+                <div class="panel-inner">
+                    <h2 class="section-title">Новая задача</h2>
+
+                    <div class="field">
+                        <label for="taskDescription">Описание ETL-задачи</label>
+                        <textarea id="taskDescription" placeholder="Опишите ETL-задачу на русском языке..."></textarea>
+                    </div>
+
+                    <div class="field">
+                        <label for="outputFormat">Формат результата</label>
+                        <select id="outputFormat">
+                            <option value="sql">SQL</option>
+                            <option value="python">Python</option>
+                            <option value="airflow_dag">Airflow DAG</option>
+                        </select>
+                    </div>
+
+                    <div class="field">
+                        <label for="sourceTables">Таблицы-источники</label>
+                        <input id="sourceTables" type="text" placeholder="orders, users, payments">
+                    </div>
+
+                    <div class="actions">
+                        <button id="generateButton" class="primary" type="button">Сгенерировать</button>
+                        <div id="generationStatus" class="status-inline">
+                            <div class="spinner"></div>
+                            <span>Генерация...</span>
+                        </div>
+                    </div>
+
+                    <p class="hint">
+                        После запуска интерфейс будет автоматически опрашивать API и подгружать готовый код, как только задача завершится.
+                    </p>
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-inner">
+                    <div class="result-header">
+                        <h2 class="section-title" style="margin: 0;">Результат</h2>
+                        <span id="taskBadge" class="badge pending">idle</span>
+                    </div>
+
+                    <div class="code-panel">
+                        <textarea id="codeEditor"></textarea>
+                    </div>
+
+                    <div class="result-actions">
+                        <button id="copyButton" class="secondary" type="button">Копировать код</button>
+                        <button id="runButton" class="secondary" type="button">Запустить</button>
+                    </div>
+
+                    <div id="executionOutput" class="output">Здесь появится результат генерации и запуска.</div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/yaml/yaml.min.js"></script>
+    <script>
+        const taskDescription = document.getElementById("taskDescription");
+        const outputFormat = document.getElementById("outputFormat");
+        const sourceTables = document.getElementById("sourceTables");
+        const generateButton = document.getElementById("generateButton");
+        const generationStatus = document.getElementById("generationStatus");
+        const taskBadge = document.getElementById("taskBadge");
+        const copyButton = document.getElementById("copyButton");
+        const runButton = document.getElementById("runButton");
+        const executionOutput = document.getElementById("executionOutput");
+
+        let currentTaskId = null;
+        let currentArtifactId = null;
+        let pollingHandle = null;
+
+        const editor = CodeMirror.fromTextArea(document.getElementById("codeEditor"), {
+            mode: "text/plain",
+            theme: "dracula",
+            lineNumbers: true,
+            readOnly: true,
+            indentUnit: 4,
+            tabSize: 4,
+            lineWrapping: true
+        });
+
+        function setBadge(status) {
+            taskBadge.className = "badge";
+            if (status) {
+                taskBadge.classList.add(status);
+            }
+            taskBadge.textContent = status || "idle";
+        }
+
+        function setOutput(message, isError = false) {
+            executionOutput.textContent = message;
+            executionOutput.classList.toggle("error", isError);
+        }
+
+        function toggleLoading(visible) {
+            generationStatus.classList.toggle("visible", visible);
+            generateButton.disabled = visible;
+        }
+
+        function languageToMode(language) {
+            if (language === "sql") {
+                return "text/x-sql";
+            }
+            if (language === "python") {
+                return "python";
+            }
+            if (language === "yaml") {
+                return "yaml";
+            }
+            return "text/plain";
+        }
+
+        function stopPolling() {
+            if (pollingHandle) {
+                clearInterval(pollingHandle);
+                pollingHandle = null;
+            }
+        }
+
+        async function fetchTask(taskId) {
+            const response = await fetch(`/api/tasks/${taskId}`);
+            if (!response.ok) {
+                throw new Error("Не удалось получить статус задачи");
+            }
+            return response.json();
+        }
+
+        async function pollTask(taskId) {
+            try {
+                const task = await fetchTask(taskId);
+                setBadge(task.status);
+
+                const latestArtifact = task.artifacts && task.artifacts.length
+                    ? task.artifacts[0]
+                    : null;
+
+                if (task.status === "done" && latestArtifact) {
+                    stopPolling();
+                    toggleLoading(false);
+                    currentArtifactId = latestArtifact.id;
+                    editor.setOption("mode", languageToMode(latestArtifact.language));
+                    editor.setValue(latestArtifact.code || "");
+                    setOutput("Код успешно сгенерирован.");
+                    return;
+                }
+
+                if (task.status === "error") {
+                    stopPolling();
+                    toggleLoading(false);
+                    const errorText = task.error_message || "Во время генерации произошла ошибка.";
+                    setOutput(errorText, true);
+                    return;
+                }
+
+                if (task.status === "pending" || task.status === "processing") {
+                    setOutput(`Задача #${taskId} в работе. Текущий статус: ${task.status}`);
+                }
+            } catch (error) {
+                stopPolling();
+                toggleLoading(false);
+                setBadge("error");
+                setOutput(error.message, true);
+            }
+        }
+
+        async function createTask() {
+            const description = taskDescription.value.trim();
+            if (!description) {
+                setOutput("Введите описание ETL-задачи.", true);
+                return;
+            }
+
+            stopPolling();
+            currentTaskId = null;
+            currentArtifactId = null;
+            editor.setOption("mode", "text/plain");
+            editor.setValue("");
+            setBadge("pending");
+            setOutput("Отправляем задачу на генерацию...");
+            toggleLoading(true);
+
+            const payload = {
+                task_description: description,
+                output_format: outputFormat.value,
+                source_tables: sourceTables.value.trim()
+                    ? sourceTables.value.split(",").map((item) => item.trim()).filter(Boolean)
+                    : null
+            };
+
+            try {
+                const response = await fetch("/api/generate", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    throw new Error("Не удалось создать задачу");
+                }
+
+                const data = await response.json();
+                currentTaskId = data.task_id;
+                setBadge(data.status);
+                setOutput(`Задача #${currentTaskId} создана. Ожидаем результат...`);
+
+                await pollTask(currentTaskId);
+                pollingHandle = setInterval(() => pollTask(currentTaskId), 2000);
+            } catch (error) {
+                toggleLoading(false);
+                setBadge("error");
+                setOutput(error.message, true);
+            }
+        }
+
+        async function runArtifact() {
+            if (!currentArtifactId) {
+                setOutput("Сначала сгенерируйте код.", true);
+                return;
+            }
+
+            runButton.disabled = true;
+            setOutput("Запускаем артефакт...");
+
+            try {
+                const response = await fetch(`/api/run/${currentArtifactId}`, {
+                    method: "POST"
+                });
+
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.detail || "Не удалось запустить артефакт");
+                }
+
+                const lines = [
+                    `Статус запуска: ${data.status}`,
+                    `Artifact ID: ${data.artifact_id}`
+                ];
+
+                if (data.airflow_run_id) {
+                    lines.push(`Airflow Run ID: ${data.airflow_run_id}`);
+                }
+
+                setOutput(lines.join("\n"));
+            } catch (error) {
+                setOutput(error.message, true);
+            } finally {
+                runButton.disabled = false;
+            }
+        }
+
+        async function copyCode() {
+            const code = editor.getValue();
+            if (!code.trim()) {
+                setOutput("Код для копирования пока отсутствует.", true);
+                return;
+            }
+
+            try {
+                await navigator.clipboard.writeText(code);
+                setOutput("Код скопирован в буфер обмена.");
+            } catch (error) {
+                setOutput("Не удалось скопировать код.", true);
+            }
+        }
+
+        generateButton.addEventListener("click", createTask);
+        runButton.addEventListener("click", runArtifact);
+        copyButton.addEventListener("click", copyCode);
+
+        setBadge("idle");
+        setOutput("Опишите задачу слева и запустите генерацию.");
+    </script>
+</body>
+</html>
