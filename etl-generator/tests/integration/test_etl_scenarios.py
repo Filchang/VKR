@@ -1,32 +1,43 @@
 import importlib
 
 import pytest
+import sqlparse
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
 
 SCENARIO_SQL = {
-    "Выбери все заказы за последние 30 дней": """
+    "Построй витрину заказов за последние 30 дней": """
+DROP TABLE IF EXISTS mart_orders_last_30_days;
+CREATE TABLE mart_orders_last_30_days AS
 SELECT *
 FROM orders
 WHERE created_at >= DATE('now', '-30 day')
 """.strip(),
-    "Посчитай сумму заказов по каждому пользователю": """
+    "Построй витрину суммы заказов по пользователям": """
+DROP TABLE IF EXISTS mart_order_totals_by_user;
+CREATE TABLE mart_order_totals_by_user AS
 SELECT user_id, SUM(amount) AS total_amount
 FROM orders
 GROUP BY user_id
 """.strip(),
-    "Получи список заказов с именами пользователей": """
+    "Построй витрину заказов с именами пользователей": """
+DROP TABLE IF EXISTS mart_orders_with_user_names;
+CREATE TABLE mart_orders_with_user_names AS
 SELECT o.id, o.user_id, u.name, o.amount, o.created_at, o.status
 FROM orders AS o
 JOIN users AS u ON u.id = o.user_id
 """.strip(),
-    "Выбери только выполненные заказы (status = completed)": """
+    "Построй витрину только выполненных заказов": """
+DROP TABLE IF EXISTS mart_completed_orders;
+CREATE TABLE mart_completed_orders AS
 SELECT *
 FROM orders
 WHERE status = 'completed'
 """.strip(),
-    "Рассчитай средний чек по категориям продуктов": """
+    "Построй витрину среднего чека по категориям": """
+DROP TABLE IF EXISTS mart_avg_check_by_category;
+CREATE TABLE mart_avg_check_by_category AS
 SELECT category, AVG(price) AS avg_check
 FROM products
 GROUP BY category
@@ -41,22 +52,28 @@ UPDATE orders
 SET status = 'expired'
 WHERE created_at < DATE('now', '-90 day')
 """.strip(),
-    "Сгруппируй заказы по месяцам, посчитай количество и сумму": """
+    "Построй витрину заказов по месяцам с количеством и суммой": """
+DROP TABLE IF EXISTS mart_orders_by_month;
+CREATE TABLE mart_orders_by_month AS
 SELECT strftime('%Y-%m', created_at) AS order_month,
        COUNT(*) AS orders_count,
        SUM(amount) AS total_amount
 FROM orders
 GROUP BY strftime('%Y-%m', created_at)
-ORDER BY order_month
+    ORDER BY order_month
 """.strip(),
-    "Найди топ-10 пользователей по сумме заказов": """
+    "Построй витрину топ-10 пользователей по сумме заказов": """
+DROP TABLE IF EXISTS mart_top_10_users_by_total;
+CREATE TABLE mart_top_10_users_by_total AS
 SELECT user_id, SUM(amount) AS total_amount
 FROM orders
 GROUP BY user_id
 ORDER BY total_amount DESC
 LIMIT 10
 """.strip(),
-    "Найди пользователей, которые заказывали продукты категории Electronics": """
+    "Построй витрину пользователей, покупавших Electronics": """
+DROP TABLE IF EXISTS mart_users_with_electronics_orders;
+CREATE TABLE mart_users_with_electronics_orders AS
 SELECT DISTINCT u.id, u.name, u.email, u.city
 FROM users AS u
 JOIN orders AS o ON o.user_id = u.id
@@ -210,29 +227,34 @@ def _run_scenario(test_db, monkeypatch, task_description: str, setup_sql: str | 
 
     assert validation_result["valid"] is True
 
-    execution = test_db.execute(text(result["sql"]))
-    if execution.returns_rows:
-        execution.fetchall()
+    for statement in sqlparse.split(result["sql"]):
+        normalized = statement.strip()
+        if not normalized:
+            continue
+
+        execution = test_db.execute(text(normalized))
+        if execution.returns_rows:
+            execution.fetchall()
 
 
-def test_simple_select_last_30_days(test_db, monkeypatch):
-    _run_scenario(test_db, monkeypatch, "Выбери все заказы за последние 30 дней")
+def test_mart_last_30_days(test_db, monkeypatch):
+    _run_scenario(test_db, monkeypatch, "Построй витрину заказов за последние 30 дней")
 
 
-def test_aggregation_sum_by_user(test_db, monkeypatch):
-    _run_scenario(test_db, monkeypatch, "Посчитай сумму заказов по каждому пользователю")
+def test_mart_sum_by_user(test_db, monkeypatch):
+    _run_scenario(test_db, monkeypatch, "Построй витрину суммы заказов по пользователям")
 
 
-def test_join_orders_with_user_names(test_db, monkeypatch):
-    _run_scenario(test_db, monkeypatch, "Получи список заказов с именами пользователей")
+def test_mart_orders_with_user_names(test_db, monkeypatch):
+    _run_scenario(test_db, monkeypatch, "Построй витрину заказов с именами пользователей")
 
 
-def test_filter_completed_orders(test_db, monkeypatch):
-    _run_scenario(test_db, monkeypatch, "Выбери только выполненные заказы (status = completed)")
+def test_mart_completed_orders(test_db, monkeypatch):
+    _run_scenario(test_db, monkeypatch, "Построй витрину только выполненных заказов")
 
 
-def test_transformation_average_check_by_category(test_db, monkeypatch):
-    _run_scenario(test_db, monkeypatch, "Рассчитай средний чек по категориям продуктов")
+def test_mart_average_check_by_category(test_db, monkeypatch):
+    _run_scenario(test_db, monkeypatch, "Построй витрину среднего чека по категориям")
 
 
 def test_insert_into_archive_table(test_db, monkeypatch):
@@ -256,17 +278,17 @@ def test_update_old_orders_to_expired(test_db, monkeypatch):
     _run_scenario(test_db, monkeypatch, "Обнови статус заказов старше 90 дней на expired")
 
 
-def test_group_orders_by_month(test_db, monkeypatch):
-    _run_scenario(test_db, monkeypatch, "Сгруппируй заказы по месяцам, посчитай количество и сумму")
+def test_mart_orders_by_month(test_db, monkeypatch):
+    _run_scenario(test_db, monkeypatch, "Построй витрину заказов по месяцам с количеством и суммой")
 
 
-def test_top_10_users_by_order_sum(test_db, monkeypatch):
-    _run_scenario(test_db, monkeypatch, "Найди топ-10 пользователей по сумме заказов")
+def test_mart_top_10_users(test_db, monkeypatch):
+    _run_scenario(test_db, monkeypatch, "Построй витрину топ-10 пользователей по сумме заказов")
 
 
-def test_complex_join_users_with_electronics_orders(test_db, monkeypatch):
+def test_mart_users_with_electronics_orders(test_db, monkeypatch):
     _run_scenario(
         test_db,
         monkeypatch,
-        "Найди пользователей, которые заказывали продукты категории Electronics",
+        "Построй витрину пользователей, покупавших Electronics",
     )

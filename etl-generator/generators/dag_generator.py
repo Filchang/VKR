@@ -1,8 +1,4 @@
 from datetime import date, datetime
-from pathlib import Path
-
-import yaml
-from jinja2 import Environment, FileSystemLoader
 
 from core.gigachat_client import GigaChatClient
 from core.prompt_builder import PromptBuilder
@@ -15,11 +11,8 @@ class DAGGenerator:
         self.prompt_builder = PromptBuilder()
         self.response_parser = ResponseParser()
 
-        templates_dir = Path(__file__).resolve().parent
-        environment = Environment(loader=FileSystemLoader(str(templates_dir)))
-        self.template = environment.get_template("dag_template.j2")
-
-    def _parse_start_date(self, start_date: str | date | datetime) -> tuple[int, int, int]:
+    @staticmethod
+    def _parse_start_date(start_date: str | date | datetime) -> tuple[int, int, int]:
         if isinstance(start_date, datetime):
             parsed = start_date.date()
         elif isinstance(start_date, date):
@@ -29,13 +22,23 @@ class DAGGenerator:
 
         return parsed.year, parsed.month, parsed.day
 
+    def _generate_from_python_dag(self, dag_config: dict, dag_code: str) -> dict:
+        return {
+            "dag_code": dag_code.strip(),
+            "dag_id": dag_config["dag_id"],
+            "success": True,
+        }
+
     def generate(self, task_description: str, schema: dict, dag_config: dict) -> dict:
+        start_year, start_month, start_day = self._parse_start_date(
+            dag_config["start_date"]
+        )
         system_prompt = (
-            f"{self.prompt_builder.build_system_prompt()}\n\n"
-            "Для Airflow DAG верни только YAML в блоке ```yaml. "
-            "YAML должен содержать поля tasks (list) и dependencies (list). "
-            "Каждый элемент tasks должен содержать task_id, function_name и code. "
-            "Каждый элемент dependencies должен содержать from и to."
+            f"{self.prompt_builder.build_system_prompt('python')}\n\n"
+            "Для Airflow DAG верни только готовый Python-код в блоке ```python. "
+            "Нужен полноценный исполняемый DAG для Airflow. "
+            "Не используй YAML, JSON и промежуточные DSL-структуры. "
+            "В коде обязательно должны быть imports Airflow, блок with DAG(...) и хотя бы один Operator."
         )
         user_prompt = (
             f"{self.prompt_builder.build_user_prompt(task_description, schema, output_format='airflow_dag')}\n\n"
@@ -43,41 +46,34 @@ class DAGGenerator:
             f"- dag_id: {dag_config['dag_id']}\n"
             f"- schedule: {dag_config['schedule']}\n"
             f"- retries: {dag_config['retries']}\n"
-            f"- start_date: {dag_config['start_date']}"
+            f"- start_date: datetime({start_year}, {start_month}, {start_day})\n"
+            f"- retry_delay_minutes: {dag_config.get('retry_delay_minutes', 5)}\n\n"
+            "Верни только Python-код DAG без пояснений."
         )
 
         response = self.gigachat_client.send_message_with_retry(
             system_prompt,
             user_prompt,
         )
-        parsed_response = self.response_parser.parse_etl_response(response, "yaml")
+        parsed_response = self.response_parser.parse_etl_response(response, "python")
 
         if not parsed_response["success"]:
             return {
                 "dag_code": "",
                 "dag_id": dag_config["dag_id"],
                 "success": False,
+                "error": "Failed to extract Python DAG from LLM response",
             }
 
-        yaml_data = yaml.safe_load(parsed_response["code"])
-        start_year, start_month, start_day = self._parse_start_date(
-            dag_config["start_date"]
-        )
+        if "with DAG(" not in parsed_response["code"]:
+            return {
+                "dag_code": "",
+                "dag_id": dag_config["dag_id"],
+                "success": False,
+                "error": "LLM response does not contain a valid Airflow DAG block",
+            }
 
-        dag_code = self.template.render(
-            dag_id=dag_config["dag_id"],
-            schedule=dag_config["schedule"],
-            retries=dag_config["retries"],
-            retry_delay_minutes=dag_config.get("retry_delay_minutes", 5),
-            start_year=start_year,
-            start_month=start_month,
-            start_day=start_day,
-            tasks=yaml_data.get("tasks", []),
-            dependencies=yaml_data.get("dependencies", []),
+        return self._generate_from_python_dag(
+            dag_config,
+            parsed_response["code"],
         )
-
-        return {
-            "dag_code": dag_code,
-            "dag_id": dag_config["dag_id"],
-            "success": True,
-        }

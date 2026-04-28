@@ -2,15 +2,21 @@ from sqlalchemy import create_engine, inspect
 
 
 class SchemaInspector:
-    def __init__(self, db_url: str):
+    def __init__(self, db_url: str, schema: str | None = None):
         self.engine = create_engine(db_url)
         self.inspector = inspect(self.engine)
+        self.schema = None if self.engine.dialect.name == "sqlite" else schema
 
     def get_all_tables(self) -> list[str]:
-        return self.inspector.get_table_names()
+        return self.inspector.get_table_names(schema=self.schema)
 
     def get_table_schema(self, table_name: str) -> list[dict]:
-        columns = self.inspector.get_columns(table_name)
+        schema_name = self.schema
+        resolved_table = table_name
+        if "." in table_name:
+            schema_name, resolved_table = table_name.split(".", 1)
+
+        columns = self.inspector.get_columns(resolved_table, schema=schema_name)
         return [
             {
                 "column": col["name"],
@@ -28,7 +34,15 @@ class SchemaInspector:
         }
 
     def get_foreign_keys(self, table_name: str) -> list[dict]:
-        foreign_keys = self.inspector.get_foreign_keys(table_name)
+        schema_name = self.schema
+        resolved_table = table_name
+        if "." in table_name:
+            schema_name, resolved_table = table_name.split(".", 1)
+
+        foreign_keys = self.inspector.get_foreign_keys(
+            resolved_table,
+            schema=schema_name,
+        )
         return [
             {
                 "referred_table": fk["referred_table"],

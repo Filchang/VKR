@@ -4,7 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from api.database import SessionLocal, engine, get_db
+from api.database import SessionLocal, apply_work_schema, engine, get_db
 from api.models import ETLTask, ExecutionLog, GeneratedArtifact
 from api.schemas import (
     ArtifactResponse,
@@ -24,6 +24,21 @@ from generators.validator import Validator
 
 
 router = APIRouter()
+
+
+def _format_validation_error(validation_result: dict) -> str | None:
+    error_message = validation_result.get("error")
+    if not error_message:
+        return None
+
+    stage = validation_result.get("stage")
+    if stage:
+        return f"Validation failed at stage '{stage}': {error_message}"
+    return f"Validation failed: {error_message}"
+
+
+def _format_exception(stage: str, exc: Exception) -> str:
+    return f"{stage}: {exc}"
 
 
 def _serialize_task(task: ETLTask, artifacts: list[GeneratedArtifact]) -> TaskResponse:
@@ -87,13 +102,14 @@ def poll_airflow_status(log_id: int, dag_id: str, dag_run_id: str) -> None:
         if log is not None:
             log.status = "error"
             log.finished_at = datetime.utcnow()
-            log.log_output = str(exc)
+            log.log_output = _format_exception("Airflow monitoring error", exc)
             db.commit()
     finally:
         db.close()
 
 
-def run_generation(task_id: int, db: Session) -> None:
+def run_generation(task_id: int) -> None:
+    db = SessionLocal()
     try:
         task = db.query(ETLTask).filter(ETLTask.id == task_id).first()
         if task is None:
@@ -104,7 +120,7 @@ def run_generation(task_id: int, db: Session) -> None:
         task.error_message = None
         db.commit()
 
-        inspector = SchemaInspector(settings.db_url)
+        inspector = SchemaInspector(settings.db_url, settings.work_db_schema)
         schema = inspector.get_full_schema(task.source_tables)
 
         output_format = task.output_format
@@ -132,13 +148,20 @@ def run_generation(task_id: int, db: Session) -> None:
         else:
             raise ValueError(f"Unsupported output format: {output_format}")
 
-        validator = Validator(settings.db_url)
-        if output_format == "sql":
-            validator_result = validator.validate_sql(artifact_code)
-        elif output_format == "python":
-            validator_result = validator.validate_python(artifact_code)
+        if not result.get("success"):
+            validator_result = {
+                "valid": False,
+                "error": result.get("error") or "Generation failed",
+                "stage": "generation",
+            }
         else:
-            validator_result = validator.validate_dag(artifact_code)
+            validator = Validator(settings.db_url)
+            if output_format == "sql":
+                validator_result = validator.validate_sql(artifact_code)
+            elif output_format == "python":
+                validator_result = validator.validate_python(artifact_code)
+            else:
+                validator_result = validator.validate_dag(artifact_code)
 
         artifact = GeneratedArtifact(
             task_id=task_id,
@@ -146,7 +169,7 @@ def run_generation(task_id: int, db: Session) -> None:
             code=artifact_code,
             language=language,
             is_valid=validator_result["valid"],
-            validation_error=validator_result["error"],
+            validation_error=_format_validation_error(validator_result),
             attempts=result.get("attempts", 1),
         )
         db.add(artifact)
@@ -155,23 +178,23 @@ def run_generation(task_id: int, db: Session) -> None:
         task.status = "done"
         if not result.get("success") or not validator_result["valid"]:
             task.status = "error"
-            task.error_message = validator_result["error"] or "Generation failed"
+            task.error_message = (
+                result.get("error")
+                or _format_validation_error(validator_result)
+                or "Generation failed"
+            )
         db.commit()
     except Exception as exc:
         task = db.query(ETLTask).filter(ETLTask.id == task_id).first()
         if task is not None:
             task.status = "error"
-            task.error_message = str(exc)
+            task.error_message = _format_exception("Generation pipeline error", exc)
             db.commit()
+    finally:
+        db.close()
 
 
-@router.post(
-    "/api/generate",
-    response_model=GenerateResponse,
-    summary="Создать задачу генерации",
-    description="Создаёт новую ETL-задачу, сохраняет её в базе данных и запускает фоновую генерацию артефакта выбранного формата.",
-    response_description="Идентификатор созданной задачи и её начальный статус.",
-)
+@router.post("/api/generate", response_model=GenerateResponse)
 def generate_etl(
     request: GenerateRequest,
     background_tasks: BackgroundTasks,
@@ -187,18 +210,12 @@ def generate_etl(
     db.commit()
     db.refresh(task)
 
-    background_tasks.add_task(run_generation, task.id, db)
+    background_tasks.add_task(run_generation, task.id)
 
     return GenerateResponse(task_id=task.id, status="pending")
 
 
-@router.get(
-    "/api/tasks/{task_id}",
-    response_model=TaskResponse,
-    summary="Получить задачу по идентификатору",
-    description="Возвращает полное состояние задачи генерации, включая вложенные артефакты и сообщение об ошибке при наличии.",
-    response_description="Подробная информация о задаче и связанных артефактах.",
-)
+@router.get("/api/tasks/{task_id}", response_model=TaskResponse)
 def get_task(task_id: int, db: Session = Depends(get_db)) -> TaskResponse:
     task = db.query(ETLTask).filter(ETLTask.id == task_id).first()
     if task is None:
@@ -213,13 +230,7 @@ def get_task(task_id: int, db: Session = Depends(get_db)) -> TaskResponse:
     return _serialize_task(task, artifacts)
 
 
-@router.get(
-    "/api/tasks",
-    response_model=list[TaskResponse],
-    summary="Получить последние задачи",
-    description="Возвращает список последних 20 задач ETL-генерации вместе с вложенными артефактами.",
-    response_description="Список последних задач, отсортированных по времени создания.",
-)
+@router.get("/api/tasks", response_model=list[TaskResponse])
 def list_tasks(db: Session = Depends(get_db)) -> list[TaskResponse]:
     tasks = db.query(ETLTask).order_by(ETLTask.created_at.desc()).limit(20).all()
     task_ids = [task.id for task in tasks]
@@ -240,13 +251,7 @@ def list_tasks(db: Session = Depends(get_db)) -> list[TaskResponse]:
     return [_serialize_task(task, artifacts_by_task.get(task.id, [])) for task in tasks]
 
 
-@router.post(
-    "/api/run/{artifact_id}",
-    response_model=RunResponse,
-    summary="Запустить артефакт",
-    description="Выполняет SQL-артефакт в транзакции, публикует и запускает Airflow DAG с последующим мониторингом или возвращает инструкцию для ручного запуска Python-скрипта.",
-    response_description="Результат запуска артефакта и идентификатор запуска Airflow при наличии.",
-)
+@router.post("/api/run/{artifact_id}", response_model=RunResponse)
 def run_artifact(
     artifact_id: int,
     background_tasks: BackgroundTasks,
@@ -264,7 +269,7 @@ def run_artifact(
         return RunResponse(
             artifact_id=artifact.id,
             status="manual",
-            message="Скачайте скрипт и запустите локально",
+            message="Скачайте скрипт и запустите его локально",
             airflow_run_id=None,
         )
 
@@ -280,6 +285,7 @@ def run_artifact(
 
         try:
             with engine.begin() as connection:
+                apply_work_schema(connection)
                 connection.execute(text(artifact.code))
 
             log.status = "success"
@@ -295,12 +301,12 @@ def run_artifact(
         except Exception as exc:
             log.status = "error"
             log.finished_at = datetime.utcnow()
-            log.log_output = str(exc)
+            log.log_output = _format_exception("SQL execution error", exc)
             db.commit()
             return RunResponse(
                 artifact_id=artifact.id,
                 status="error",
-                message=str(exc),
+                message=_format_exception("SQL execution error", exc),
                 airflow_run_id=None,
             )
 
@@ -376,14 +382,11 @@ def run_artifact(
     )
 
 
-@router.get(
-    "/api/logs/{artifact_id}",
-    response_model=list[ExecutionLogResponse],
-    summary="Получить логи выполнения артефакта",
-    description="Возвращает все записи ExecutionLog для указанного артефакта, включая статусы, временные отметки и текстовые логи.",
-    response_description="Список логов выполнения выбранного артефакта.",
-)
-def get_artifact_logs(artifact_id: int, db: Session = Depends(get_db)) -> list[ExecutionLogResponse]:
+@router.get("/api/logs/{artifact_id}", response_model=list[ExecutionLogResponse])
+def get_artifact_logs(
+    artifact_id: int,
+    db: Session = Depends(get_db),
+) -> list[ExecutionLogResponse]:
     artifact = (
         db.query(GeneratedArtifact)
         .filter(GeneratedArtifact.id == artifact_id)

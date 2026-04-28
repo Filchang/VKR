@@ -1,138 +1,94 @@
-# ETL Generator — Интеллектуальная система генерации ETL-процессов
+# ETL Generator
 
-## Описание
-ETL Generator — это сервис, который принимает описание ETL-задачи на русском языке, анализирует доступную схему базы данных и генерирует готовые артефакты для реализации пайплайна. Система умеет создавать SQL-запросы, Python-скрипты и Airflow DAG, а затем валидировать результат и сохранять историю генерации и запусков.
+Сервис генерирует SQL, Python ETL-скрипты и Airflow DAG по текстовому описанию задачи. В основе лежат FastAPI, SQLAlchemy и GigaChat, поверх которых добавлены валидация кода, хранение истории генераций и запуск артефактов.
 
-В основе проекта лежит интеграция с GigaChat, FastAPI и SQLAlchemy. Поверх LLM-генерации добавлены парсинг ответов, повторные попытки с автоисправлением, валидация кода, REST API для работы с задачами и минималистичный веб-интерфейс для запуска сценариев и просмотра результата.
+## Что изменено
 
-## Стек технологий
-| Компонент | Технология | Версия |
-| --- | --- | --- |
-| Backend API | FastAPI | 0.136.1 |
-| ASGI-сервер | Uvicorn | 0.43.0 |
-| ORM / DB access | SQLAlchemy | 2.0.49 |
-| PostgreSQL driver | psycopg2-binary | 2.9.11 |
-| LLM SDK | gigachat | 0.2.0 |
-| Config management | pydantic-settings | 2.13.1 |
-| Data validation | pydantic | 2.13.3 |
-| Templates | Jinja2 | 3.1.6 |
-| SQL parsing | sqlparse | 0.5.5 |
-| Data processing | pandas | 3.0.2 |
-| Migrations | alembic | 1.18.4 |
-| HTTP client | httpx | 0.28.1 |
-| Tests | pytest / pytest-asyncio | 9.0.3 / 1.3.0 |
-| Containers | Docker / Docker Compose | compose file 3.9 |
-| Scheduler | Apache Airflow | 2.8.0 |
+- Служебные таблицы приложения вынесены в отдельную схему БД.
+- Рабочие таблицы и исполняемый SQL используют отдельную рабочую схему.
+- SQL-валидатор теперь поддерживает многооператорные скрипты и DDL/DML, а не только `SELECT`.
+- Генерация Airflow DAG нормализует идентификаторы, рендерит валидный Python и ждёт регистрации DAG в Airflow перед запуском.
+- Ошибки генерации и запуска стали информативнее в API и UI.
 
-## Быстрый старт
-1. `git clone <repo-url>`
-2. `cd etl-generator`
-3. `cp .env.example .env`
-4. Заполнить в `.env` переменную `GIGACHAT_API_KEY` и при необходимости остальные параметры.
-5. `docker-compose up -d`
-6. Открыть `http://localhost:8000`
+## Структура БД
+
+По умолчанию используются две схемы:
+
+- `service` для таблиц приложения: `etl_tasks`, `generated_artifacts`, `execution_logs`
+- `public` для рабочих таблиц ETL
+
+Это поведение настраивается через переменные окружения:
+
+- `APP_DB_SCHEMA` или старое имя `SERVICE_SCHEMA`
+- `WORK_DB_SCHEMA` или старое имя `WORKSPACE_SCHEMA`
+
+При старте приложения нужные схемы создаются автоматически, если СУБД это поддерживает.
+
+## Основные переменные окружения
+
+- `GIGACHAT_API_KEY` — ключ доступа к GigaChat
+- `GIGACHAT_SCOPE` — scope для GigaChat
+- `DB_URL` — строка подключения к основной БД
+- `APP_DB_SCHEMA` — схема служебных таблиц, по умолчанию `service`
+- `WORK_DB_SCHEMA` — схема рабочих таблиц, по умолчанию `public`
+- `AIRFLOW_URL` — URL Airflow API
+- `AIRFLOW_USER` — пользователь Airflow
+- `AIRFLOW_PASSWORD` — пароль Airflow
+- `DAGS_FOLDER` — каталог, куда приложение пишет сгенерированные DAG
+
+## Запуск
+
+```bash
+docker-compose up -d
+```
+
+После старта:
+
+- UI: `http://localhost:8000`
+- Swagger: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+- Airflow: `http://localhost:8080`
+
+## Как работает SQL-валидация
+
+- Скрипт разбивается на отдельные SQL-операторы.
+- `SELECT`, `INSERT`, `UPDATE`, `DELETE` проверяются через `EXPLAIN`.
+- Остальные операторы, включая `CREATE TABLE`, `ALTER`, `TRUNCATE`, выполняются в транзакции с последующим `ROLLBACK`.
+- Перед валидацией и реальным запуском для PostgreSQL выставляется `search_path` с приоритетом рабочей схемы.
+
+Это позволяет пропускать типовые ETL-скрипты, которые создают временные или итоговые таблицы.
+
+## Airflow DAG
+
+Сгенерированный DAG:
+
+- получает безопасные Python-идентификаторы для функций и task variables
+- использует `PythonOperator`
+- рендерится через Jinja-шаблон в валидный Python-код
+- после деплоя ожидает появления DAG в Airflow API и снимает паузу перед запуском
+
+## Тесты
+
+```bash
+pytest tests/unit/test_validator_and_dag.py tests/integration/test_etl_scenarios.py -q
+```
+
+Покрыты:
+
+- SQL-сценарии генерации и валидации
+- DAG-рендеринг и нормализация идентификаторов
+- поддержка DDL/DML в SQL-валидаторе
 
 ## Структура проекта
+
 ```text
 etl-generator/
-├── api/                 # FastAPI-приложение, роуты, ORM-модели и схемы API
-│   ├── database.py      # Подключение к БД, SessionLocal, init_db
-│   ├── main.py          # Точка входа FastAPI, CORS, статика, startup
-│   ├── models.py        # SQLAlchemy ORM-модели задач, артефактов и логов
-│   ├── routes.py        # REST API для генерации, запуска и мониторинга
-│   ├── schemas.py       # Pydantic-схемы запросов и ответов
-│   └── __init__.py      # Python-пакет API
-├── core/                # Базовая бизнес-логика и интеграции
-│   ├── airflow_deployer.py  # Деплой и запуск DAG через Airflow REST API
-│   ├── config.py            # Настройки проекта через pydantic-settings
-│   ├── gigachat_client.py   # Обёртка над SDK GigaChat
-│   ├── prompt_builder.py    # Построение системных и пользовательских промптов
-│   ├── response_parser.py   # Извлечение кода из ответов LLM
-│   ├── retry_pipeline.py    # Пайплайн автоисправления и повторных попыток
-│   ├── schema_inspector.py  # Интроспекция схемы БД через SQLAlchemy
-│   └── __init__.py          # Python-пакет core
-├── dags/                # Каталог для сгенерированных Airflow DAG
-├── generators/          # Генераторы кода и валидатор
-│   ├── dag_generator.py     # Генерация Airflow DAG по YAML-структуре
-│   ├── dag_template.j2      # Jinja2-шаблон DAG
-│   ├── python_generator.py  # Генерация Python ETL-скриптов
-│   ├── sql_generator.py     # Генерация SQL ETL-сценариев
-│   ├── validator.py         # Валидация SQL, Python и DAG-кода
-│   └── __init__.py          # Python-пакет generators
-├── tests/               # Unit- и integration-тесты
-│   ├── integration/         # Интеграционные ETL-сценарии
-│   ├── unit/                # Модульные тесты компонентов
-│   └── __init__.py          # Python-пакет tests
-├── ui/                  # Одностраничный веб-интерфейс
-│   └── index.html           # Frontend без фреймворков, CodeMirror UI
-├── .env.example         # Пример переменных окружения
-├── .gitignore           # Исключения Git
-├── docker-compose.yml   # Локальная инфраструктура: app, postgres, airflow
-├── Dockerfile           # Образ приложения FastAPI
-├── requirements.txt     # Python-зависимости
-├── setup.cfg            # Конфигурация pytest
-└── README.md            # Документация проекта
+├── api/            # FastAPI, ORM-модели, роуты
+├── core/           # конфиг, интеграции, инспекция схемы, деплой DAG
+├── generators/     # генераторы SQL/Python/DAG и валидатор
+├── tests/          # unit и integration тесты
+├── ui/             # статический web UI
+├── Dockerfile
+├── docker-compose.yml
+└── README.md
 ```
-
-## API документация
-| Метод | Путь | Описание | Пример запроса |
-| --- | --- | --- | --- |
-| `POST` | `/api/generate` | Создать задачу генерации ETL-артефакта | `{"task_description":"Посчитай сумму заказов по пользователям","output_format":"sql","source_tables":["orders","users"]}` |
-| `GET` | `/api/tasks/{task_id}` | Получить статус задачи и связанные артефакты | `GET /api/tasks/1` |
-| `GET` | `/api/tasks` | Получить последние 20 задач | `GET /api/tasks` |
-| `POST` | `/api/run/{artifact_id}` | Запустить SQL или Airflow DAG, либо получить инструкцию для Python | `POST /api/run/5` |
-| `GET` | `/api/logs/{artifact_id}` | Получить историю запусков артефакта | `GET /api/logs/5` |
-
-OpenAPI и Swagger UI доступны после запуска приложения:
-- `http://localhost:8000/docs`
-- `http://localhost:8000/redoc`
-
-## Примеры использования
-```bash
-curl -X POST http://localhost:8000/api/generate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "task_description": "Посчитай сумму заказов по каждому пользователю",
-    "output_format": "sql",
-    "source_tables": ["orders", "users"]
-  }'
-```
-
-```bash
-curl -X POST http://localhost:8000/api/generate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "task_description": "Сгенерируй Python ETL-скрипт для загрузки заказов в витрину",
-    "output_format": "python",
-    "source_tables": ["orders", "users"]
-  }'
-```
-
-```bash
-curl -X POST http://localhost:8000/api/generate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "task_description": "Сгенерируй Airflow DAG для ежедневной загрузки заказов",
-    "output_format": "airflow_dag",
-    "source_tables": ["orders", "users", "products"]
-  }'
-```
-
-## Запуск тестов
-```bash
-docker-compose exec app pytest tests/ -v
-```
-
-## Конфигурация
-| Переменная | Описание | Пример значения |
-| --- | --- | --- |
-| `GIGACHAT_API_KEY` | API-ключ для доступа к GigaChat | `eyJhbGciOi...` |
-| `GIGACHAT_SCOPE` | Scope для авторизации в GigaChat | `GIGACHAT_API_PERS` |
-| `DB_URL` | Строка подключения к рабочей БД приложения | `postgresql://etl:etl@postgres:5432/etldb` |
-| `AIRFLOW_URL` | Базовый URL Airflow REST API | `http://localhost:8080` |
-| `AIRFLOW_USER` | Пользователь Airflow | `airflow` |
-| `AIRFLOW_PASSWORD` | Пароль Airflow | `airflow` |
-
----
-
-Проект можно расширять новыми генераторами, схемами выполнения и стратегиями валидации без изменения базового API-контракта.

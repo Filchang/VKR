@@ -10,7 +10,6 @@
         :root {
             --bg: #0f1720;
             --panel: #16212d;
-            --panel-alt: #1b2938;
             --border: #2c4156;
             --text: #edf4ff;
             --muted: #9fb1c5;
@@ -24,9 +23,7 @@
             --sans: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
         }
 
-        * {
-            box-sizing: border-box;
-        }
+        * { box-sizing: border-box; }
 
         body {
             margin: 0;
@@ -81,9 +78,7 @@
             overflow: hidden;
         }
 
-        .panel-inner {
-            padding: 22px;
-        }
+        .panel-inner { padding: 22px; }
 
         .section-title {
             margin: 0 0 16px;
@@ -100,9 +95,7 @@
             color: var(--muted);
         }
 
-        textarea,
-        select,
-        input {
+        textarea, select, input {
             width: 100%;
             border: 1px solid #30475e;
             border-radius: 14px;
@@ -118,25 +111,23 @@
             resize: vertical;
         }
 
-        textarea:focus,
-        select:focus,
-        input:focus {
+        textarea:focus, select:focus, input:focus {
             outline: none;
             border-color: var(--accent);
             box-shadow: 0 0 0 4px rgba(86, 194, 255, 0.12);
         }
 
-        .field {
-            margin-bottom: 16px;
-        }
+        .field { margin-bottom: 16px; }
 
-        .actions {
+        .actions, .result-actions {
             display: flex;
             gap: 10px;
             align-items: center;
             flex-wrap: wrap;
-            margin-top: 18px;
         }
+
+        .actions { margin-top: 18px; }
+        .result-actions { margin-top: 14px; }
 
         button {
             border: 0;
@@ -147,15 +138,8 @@
             transition: transform 0.15s ease, opacity 0.15s ease, background 0.15s ease;
         }
 
-        button:hover {
-            transform: translateY(-1px);
-        }
-
-        button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
-        }
+        button:hover { transform: translateY(-1px); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
         .primary {
             background: linear-gradient(135deg, var(--accent), var(--accent-strong));
@@ -176,9 +160,7 @@
             font-size: 14px;
         }
 
-        .status-inline.visible {
-            display: inline-flex;
-        }
+        .status-inline.visible { display: inline-flex; }
 
         .spinner {
             width: 16px;
@@ -189,11 +171,7 @@
             animation: spin 0.8s linear infinite;
         }
 
-        @keyframes spin {
-            to {
-                transform: rotate(360deg);
-            }
-        }
+        @keyframes spin { to { transform: rotate(360deg); } }
 
         .result-header {
             display: flex;
@@ -216,44 +194,44 @@
             color: var(--muted);
         }
 
-        .badge.pending {
-            color: var(--warning);
-            background: rgba(251, 191, 36, 0.12);
-        }
-
-        .badge.processing {
-            color: var(--accent);
-            background: rgba(86, 194, 255, 0.12);
-        }
-
-        .badge.done {
-            color: var(--success);
-            background: rgba(52, 211, 153, 0.12);
-        }
-
-        .badge.error {
-            color: var(--error);
-            background: rgba(248, 113, 113, 0.12);
-        }
+        .badge.pending { color: var(--warning); background: rgba(251, 191, 36, 0.12); }
+        .badge.processing { color: var(--accent); background: rgba(86, 194, 255, 0.12); }
+        .badge.done { color: var(--success); background: rgba(52, 211, 153, 0.12); }
+        .badge.error { color: var(--error); background: rgba(248, 113, 113, 0.12); }
 
         .code-panel {
+            position: relative;
             border: 1px solid rgba(255, 255, 255, 0.07);
             border-radius: 16px;
             overflow: hidden;
             background: #11161c;
         }
 
+        .download-button {
+            position: absolute;
+            right: 14px;
+            bottom: 14px;
+            width: 42px;
+            height: 42px;
+            padding: 0;
+            border-radius: 12px;
+            background: rgba(15, 23, 32, 0.92);
+            color: var(--text);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+            z-index: 5;
+            font-size: 20px;
+            line-height: 1;
+        }
+
+        .download-button:hover {
+            background: rgba(28, 40, 54, 0.96);
+        }
+
         .CodeMirror {
             height: 480px;
             font-family: var(--mono);
             font-size: 14px;
-        }
-
-        .result-actions {
-            display: flex;
-            gap: 10px;
-            margin-top: 14px;
-            flex-wrap: wrap;
         }
 
         .output {
@@ -281,13 +259,8 @@
         }
 
         @media (max-width: 980px) {
-            .layout {
-                grid-template-columns: 1fr;
-            }
-
-            .CodeMirror {
-                height: 380px;
-            }
+            .layout { grid-template-columns: 1fr; }
+            .CodeMirror { height: 380px; }
         }
     </style>
 </head>
@@ -347,6 +320,7 @@
 
                     <div class="code-panel">
                         <textarea id="codeEditor"></textarea>
+                        <button id="downloadButton" class="download-button" type="button" title="Скачать скрипт">&#8681;</button>
                     </div>
 
                     <div class="result-actions">
@@ -373,10 +347,13 @@
         const taskBadge = document.getElementById("taskBadge");
         const copyButton = document.getElementById("copyButton");
         const runButton = document.getElementById("runButton");
+        const downloadButton = document.getElementById("downloadButton");
         const executionOutput = document.getElementById("executionOutput");
 
         let currentTaskId = null;
         let currentArtifactId = null;
+        let currentArtifactType = null;
+        let currentArtifactLanguage = null;
         let pollingHandle = null;
 
         const editor = CodeMirror.fromTextArea(document.getElementById("codeEditor"), {
@@ -408,16 +385,24 @@
         }
 
         function languageToMode(language) {
-            if (language === "sql") {
-                return "text/x-sql";
-            }
-            if (language === "python") {
-                return "python";
-            }
-            if (language === "yaml") {
-                return "yaml";
-            }
+            if (language === "sql") return "text/x-sql";
+            if (language === "python") return "python";
+            if (language === "yaml") return "yaml";
             return "text/plain";
+        }
+
+        function extensionFromArtifact(artifactType, language) {
+            if (artifactType === "sql" || language === "sql") return "sql";
+            if (artifactType === "python" || artifactType === "airflow_dag" || language === "python") return "py";
+            if (language === "yaml") return "yaml";
+            return "txt";
+        }
+
+        function buildDownloadFilename() {
+            const extension = extensionFromArtifact(currentArtifactType, currentArtifactLanguage);
+            const typeName = currentArtifactType || currentArtifactLanguage || "artifact";
+            const taskPart = currentTaskId ? `task_${currentTaskId}` : "task";
+            return `${taskPart}_${typeName}.${extension}`;
         }
 
         function stopPolling() {
@@ -427,10 +412,29 @@
             }
         }
 
+        async function readJsonSafe(response) {
+            try {
+                return await response.json();
+            } catch {
+                return null;
+            }
+        }
+
+        function formatApiError(payload, fallbackMessage) {
+            if (!payload) return fallbackMessage;
+            if (typeof payload.detail === "string" && payload.detail.trim()) return payload.detail;
+            if (typeof payload.message === "string" && payload.message.trim()) return payload.message;
+            if (Array.isArray(payload.detail) && payload.detail.length) {
+                return payload.detail.map((item) => item.msg || JSON.stringify(item)).join("\n");
+            }
+            return fallbackMessage;
+        }
+
         async function fetchTask(taskId) {
             const response = await fetch(`/api/tasks/${taskId}`);
             if (!response.ok) {
-                throw new Error("Не удалось получить статус задачи");
+                const payload = await readJsonSafe(response);
+                throw new Error(formatApiError(payload, "Не удалось получить статус задачи"));
             }
             return response.json();
         }
@@ -440,14 +444,14 @@
                 const task = await fetchTask(taskId);
                 setBadge(task.status);
 
-                const latestArtifact = task.artifacts && task.artifacts.length
-                    ? task.artifacts[0]
-                    : null;
+                const latestArtifact = task.artifacts && task.artifacts.length ? task.artifacts[0] : null;
 
                 if (task.status === "done" && latestArtifact) {
                     stopPolling();
                     toggleLoading(false);
                     currentArtifactId = latestArtifact.id;
+                    currentArtifactType = latestArtifact.artifact_type;
+                    currentArtifactLanguage = latestArtifact.language;
                     editor.setOption("mode", languageToMode(latestArtifact.language));
                     editor.setValue(latestArtifact.code || "");
                     setOutput("Код успешно сгенерирован.");
@@ -457,8 +461,12 @@
                 if (task.status === "error") {
                     stopPolling();
                     toggleLoading(false);
-                    const errorText = task.error_message || "Во время генерации произошла ошибка.";
-                    setOutput(errorText, true);
+                    const details = [];
+                    if (task.error_message) details.push(task.error_message);
+                    if (latestArtifact && latestArtifact.validation_error) {
+                        details.push(`Artifact validation: ${latestArtifact.validation_error}`);
+                    }
+                    setOutput(details.length ? details.join("\n\n") : "Во время генерации произошла ошибка.", true);
                     return;
                 }
 
@@ -483,6 +491,8 @@
             stopPolling();
             currentTaskId = null;
             currentArtifactId = null;
+            currentArtifactType = null;
+            currentArtifactLanguage = null;
             editor.setOption("mode", "text/plain");
             editor.setValue("");
             setBadge("pending");
@@ -500,14 +510,13 @@
             try {
                 const response = await fetch("/api/generate", {
                     method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
+                    headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload)
                 });
 
                 if (!response.ok) {
-                    throw new Error("Не удалось создать задачу");
+                    const payload = await readJsonSafe(response);
+                    throw new Error(formatApiError(payload, "Не удалось создать задачу"));
                 }
 
                 const data = await response.json();
@@ -534,13 +543,10 @@
             setOutput("Запускаем артефакт...");
 
             try {
-                const response = await fetch(`/api/run/${currentArtifactId}`, {
-                    method: "POST"
-                });
-
-                const data = await response.json();
+                const response = await fetch(`/api/run/${currentArtifactId}`, { method: "POST" });
+                const data = await readJsonSafe(response);
                 if (!response.ok) {
-                    throw new Error(data.detail || "Не удалось запустить артефакт");
+                    throw new Error(formatApiError(data, "Не удалось запустить артефакт"));
                 }
 
                 const lines = [
@@ -548,11 +554,10 @@
                     `Artifact ID: ${data.artifact_id}`
                 ];
 
-                if (data.airflow_run_id) {
-                    lines.push(`Airflow Run ID: ${data.airflow_run_id}`);
-                }
+                if (data.message) lines.push(`Message: ${data.message}`);
+                if (data.airflow_run_id) lines.push(`Airflow Run ID: ${data.airflow_run_id}`);
 
-                setOutput(lines.join("\n"));
+                setOutput(lines.join("\n"), data.status === "error");
             } catch (error) {
                 setOutput(error.message, true);
             } finally {
@@ -570,14 +575,34 @@
             try {
                 await navigator.clipboard.writeText(code);
                 setOutput("Код скопирован в буфер обмена.");
-            } catch (error) {
+            } catch {
                 setOutput("Не удалось скопировать код.", true);
             }
+        }
+
+        function downloadCode() {
+            const code = editor.getValue();
+            if (!code.trim()) {
+                setOutput("Код для сохранения пока отсутствует.", true);
+                return;
+            }
+
+            const blob = new Blob([code], { type: "text/plain;charset=utf-8" });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = buildDownloadFilename();
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+            setOutput(`Скрипт сохранён как ${link.download}.`);
         }
 
         generateButton.addEventListener("click", createTask);
         runButton.addEventListener("click", runArtifact);
         copyButton.addEventListener("click", copyCode);
+        downloadButton.addEventListener("click", downloadCode);
 
         setBadge("idle");
         setOutput("Опишите задачу слева и запустите генерацию.");

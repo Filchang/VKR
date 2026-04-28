@@ -1,11 +1,22 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, MetaData, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from core.config import settings
+
+
+SERVICE_SCHEMA = None if settings.db_url.startswith("sqlite") else settings.app_db_schema
+
+
+def _qualified_table_name(table_name: str) -> str:
+    if SERVICE_SCHEMA:
+        return f"{SERVICE_SCHEMA}.{table_name}"
+    return table_name
 
 
 class Base(DeclarativeBase):
-    pass
+    metadata = MetaData(schema=SERVICE_SCHEMA)
 
 
 class ETLTask(Base):
@@ -25,7 +36,10 @@ class GeneratedArtifact(Base):
     __tablename__ = "generated_artifacts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    task_id: Mapped[int] = mapped_column(Integer, ForeignKey("etl_tasks.id"))
+    task_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(_qualified_table_name("etl_tasks.id")),
+    )
     artifact_type: Mapped[str] = mapped_column(String(20))
     code: Mapped[str] = mapped_column(Text)
     language: Mapped[str] = mapped_column(String(20))
@@ -39,7 +53,10 @@ class ExecutionLog(Base):
     __tablename__ = "execution_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    artifact_id: Mapped[int] = mapped_column(Integer, ForeignKey("generated_artifacts.id"))
+    artifact_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(_qualified_table_name("generated_artifacts.id")),
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(20))

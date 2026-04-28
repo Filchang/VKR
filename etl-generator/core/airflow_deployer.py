@@ -12,27 +12,55 @@ class AirflowDeployer:
         self.auth = (settings.airflow_user, settings.airflow_password)
         self.dags_folder = settings.dags_folder
 
+    @staticmethod
+    def _build_error_message(exc: Exception) -> str:
+        if isinstance(exc, httpx.HTTPStatusError):
+            response = exc.response
+            return f"HTTP {response.status_code}: {response.text}"
+        return str(exc)
+
+    def _wait_for_dag_registration(self, dag_id: str, timeout_seconds: int = 30) -> None:
+        started_at = time.time()
+        last_error: str | None = None
+
+        while time.time() - started_at < timeout_seconds:
+            try:
+                with httpx.Client(auth=self.auth, timeout=10.0) as client:
+                    response = client.get(f"{self.base_url}/api/v1/dags/{dag_id}")
+                    response.raise_for_status()
+
+                    unpause_response = client.patch(
+                        f"{self.base_url}/api/v1/dags/{dag_id}",
+                        json={"is_paused": False},
+                    )
+                    unpause_response.raise_for_status()
+                return
+            except Exception as exc:
+                last_error = self._build_error_message(exc)
+                time.sleep(2)
+
+        raise RuntimeError(
+            f"DAG {dag_id} was not registered in Airflow within {timeout_seconds}s. "
+            f"Last error: {last_error or 'unknown'}"
+        )
+
     def deploy_dag(self, dag_id: str, dag_code: str) -> dict:
         dag_path = Path(self.dags_folder) / f"{dag_id}.py"
         dag_path.parent.mkdir(parents=True, exist_ok=True)
         dag_path.write_text(dag_code, encoding="utf-8")
 
-        time.sleep(3)
-
         try:
-            with httpx.Client(auth=self.auth, timeout=30.0) as client:
-                response = client.get(f"{self.base_url}/api/v1/dags/{dag_id}")
-                response.raise_for_status()
+            self._wait_for_dag_registration(dag_id)
             return {"deployed": True, "error": None}
         except Exception as exc:
-            return {"deployed": False, "error": str(exc)}
+            return {"deployed": False, "error": self._build_error_message(exc)}
 
-    def trigger_dag(self, dag_id: str, conf: dict = {}) -> dict:
+    def trigger_dag(self, dag_id: str, conf: dict | None = None) -> dict:
         try:
             with httpx.Client(auth=self.auth, timeout=30.0) as client:
                 response = client.post(
                     f"{self.base_url}/api/v1/dags/{dag_id}/dagRuns",
-                    json={"conf": conf},
+                    json={"conf": conf or {}},
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -45,7 +73,7 @@ class AirflowDeployer:
             return {
                 "dag_run_id": "",
                 "state": "",
-                "error": str(exc),
+                "error": self._build_error_message(exc),
             }
 
     def get_dag_run_status(self, dag_id: str, dag_run_id: str) -> dict:

@@ -1,7 +1,7 @@
+from datetime import datetime, timedelta
+
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from datetime import datetime, timedelta
-import logging
 
 default_args = {
     'owner': 'etl-generator',
@@ -13,19 +13,20 @@ with DAG(
     dag_id='{{ dag_id }}',
     default_args=default_args,
     start_date=datetime({{ start_year }}, {{ start_month }}, {{ start_day }}),
-    schedule_interval='{{ schedule }}',
+    schedule={{ schedule | tojson }},
     catchup=False,
     tags=['generated'],
 ) as dag:
-    {% for task in tasks %}
+{% for task in tasks %}
     def {{ task.function_name }}(**context):
-        {{ task.code | indent(8) }}
+{{ task.code | indent(8, true) }}
 
-    {{ task.task_id }} = PythonOperator(
-        task_id='{{ task.task_id }}',
+    {{ task.variable_name }} = PythonOperator(
+        task_id={{ task.task_id | tojson }},
         python_callable={{ task.function_name }},
     )
-    {% endfor %}
-    {% for dep in dependencies %}
-    {{ dep.from }} >> {{ dep.to }}
-    {% endfor %}
+
+{% endfor %}
+{% for dep in dependencies %}
+    {{ dep.source_var }} >> {{ dep.target_var }}
+{% endfor %}
