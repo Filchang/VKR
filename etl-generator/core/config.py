@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     airflow_user: str = "airflow"
     airflow_password: str = "airflow"
     dags_folder: str = "./dags"
+    airflow_registration_timeout_seconds: int = 60
+    airflow_registration_poll_interval_seconds: float = 1.0
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

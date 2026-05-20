@@ -1,21 +1,31 @@
+import time
 from datetime import datetime
+from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from sqlalchemy import text
+import sqlparse
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from api.database import SessionLocal, apply_work_schema, engine, get_db
 from api.models import ETLTask, ExecutionLog, GeneratedArtifact
 from api.schemas import (
     ArtifactResponse,
+    CSVTableInfo,
+    CSVUploadResponse,
     ExecutionLogResponse,
     GenerateRequest,
     GenerateResponse,
     RunResponse,
+    SchemaResponse,
+    SchemaTableColumn,
+    StatsResponse,
     TaskResponse,
 )
 from core.airflow_deployer import AirflowDeployer
 from core.config import settings
+from core.csv_processor import CSVProcessor
+from core.etl_classifier import ETLClassifier
 from core.schema_inspector import SchemaInspector
 from generators.dag_generator import DAGGenerator
 from generators.python_generator import PythonGenerator
@@ -24,14 +34,31 @@ from generators.validator import Validator
 
 
 router = APIRouter()
+_classifier = ETLClassifier()
+
+
+def _to_json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
 
 
 def _format_validation_error(validation_result: dict) -> str | None:
     error_message = validation_result.get("error")
+    stage = validation_result.get("stage")
+
+    if not error_message:
+        errors = validation_result.get("errors") or []
+        if errors:
+            first_error = errors[0]
+            error_message = first_error.get("error") or first_error.get("message")
+            stage = stage or first_error.get("stage")
+
     if not error_message:
         return None
 
-    stage = validation_result.get("stage")
     if stage:
         return f"Validation failed at stage '{stage}': {error_message}"
     return f"Validation failed: {error_message}"
@@ -51,6 +78,8 @@ def _serialize_task(task: ETLTask, artifacts: list[GeneratedArtifact]) -> TaskRe
         status=task.status,
         source_tables=task.source_tables,
         error_message=task.error_message,
+        etl_pattern=task.etl_pattern,
+        generation_time_ms=task.generation_time_ms,
         artifacts=[
             ArtifactResponse(
                 id=artifact.id,
@@ -87,7 +116,6 @@ def poll_airflow_status(log_id: int, dag_id: str, dag_run_id: str) -> None:
         log = db.query(ExecutionLog).filter(ExecutionLog.id == log_id).first()
         if log is None:
             return
-
         state = final_status.get("state", "error")
         log.status = "success" if state == "success" else "error"
         log.finished_at = datetime.utcnow()
@@ -120,13 +148,21 @@ def run_generation(task_id: int) -> None:
         task.error_message = None
         db.commit()
 
+        classification = _classifier.classify(task.task_description)
+        task.etl_pattern = classification.pattern
+        db.commit()
+
         inspector = SchemaInspector(settings.db_url, settings.work_db_schema)
         schema = inspector.get_full_schema(task.source_tables)
 
+        gen_start = time.monotonic()
         output_format = task.output_format
+
         if output_format == "sql":
             generator = SQLGenerator()
-            result = generator.generate_with_correction(task.task_description, schema)
+            result = generator.generate_with_correction(
+                task.task_description, schema, classification=classification
+            )
             artifact_code = result.get("sql", "")
             language = "sql"
         elif output_format == "python":
@@ -138,21 +174,27 @@ def run_generation(task_id: int) -> None:
             generator = DAGGenerator()
             dag_config = {
                 "dag_id": f"etl_task_{task_id}",
-                "schedule": "@daily",
+                "schedule": task.dag_schedule or "@daily",
                 "retries": 1,
                 "start_date": datetime.utcnow().strftime("%Y-%m-%d"),
             }
-            result = generator.generate(task.task_description, schema, dag_config)
+            result = generator.generate_with_correction(
+                task.task_description, schema, dag_config
+            )
             artifact_code = result.get("dag_code", "")
             language = "python"
         else:
             raise ValueError(f"Unsupported output format: {output_format}")
 
+        gen_ms = int((time.monotonic() - gen_start) * 1000)
+        task.generation_time_ms = gen_ms
+        db.commit()
+
         if not result.get("success"):
             validator_result = {
                 "valid": False,
                 "error": result.get("error") or "Generation failed",
-                "stage": "generation",
+                "stage": result.get("error_stage", "generation"),
             }
         else:
             validator = Validator(settings.db_url)
@@ -200,11 +242,15 @@ def generate_etl(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> GenerateResponse:
+    classification = _classifier.classify(request.task_description)
+
     task = ETLTask(
         task_description=request.task_description,
         output_format=request.output_format,
         status="pending",
         source_tables=request.source_tables,
+        etl_pattern=classification.pattern,
+        dag_schedule=request.dag_schedule,
     )
     db.add(task)
     db.commit()
@@ -212,7 +258,11 @@ def generate_etl(
 
     background_tasks.add_task(run_generation, task.id)
 
-    return GenerateResponse(task_id=task.id, status="pending")
+    return GenerateResponse(
+        task_id=task.id,
+        status="pending",
+        etl_pattern=classification.pattern,
+    )
 
 
 @router.get("/api/tasks/{task_id}", response_model=TaskResponse)
@@ -232,7 +282,7 @@ def get_task(task_id: int, db: Session = Depends(get_db)) -> TaskResponse:
 
 @router.get("/api/tasks", response_model=list[TaskResponse])
 def list_tasks(db: Session = Depends(get_db)) -> list[TaskResponse]:
-    tasks = db.query(ETLTask).order_by(ETLTask.created_at.desc()).limit(20).all()
+    tasks = db.query(ETLTask).order_by(ETLTask.created_at.desc()).limit(50).all()
     task_ids = [task.id for task in tasks]
 
     artifacts = (
@@ -249,6 +299,30 @@ def list_tasks(db: Session = Depends(get_db)) -> list[TaskResponse]:
         artifacts_by_task.setdefault(artifact.task_id, []).append(artifact)
 
     return [_serialize_task(task, artifacts_by_task.get(task.id, [])) for task in tasks]
+
+
+@router.delete("/api/tasks/{task_id}", status_code=204)
+def delete_task(task_id: int, db: Session = Depends(get_db)) -> None:
+    task = db.query(ETLTask).filter(ETLTask.id == task_id).first()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    artifact_ids = [
+        a.id
+        for a in db.query(GeneratedArtifact)
+        .filter(GeneratedArtifact.task_id == task_id)
+        .all()
+    ]
+    if artifact_ids:
+        db.query(ExecutionLog).filter(
+            ExecutionLog.artifact_id.in_(artifact_ids)
+        ).delete(synchronize_session=False)
+        db.query(GeneratedArtifact).filter(
+            GeneratedArtifact.task_id == task_id
+        ).delete(synchronize_session=False)
+
+    db.delete(task)
+    db.commit()
 
 
 @router.post("/api/run/{artifact_id}", response_model=RunResponse)
@@ -284,19 +358,31 @@ def run_artifact(
         db.refresh(log)
 
         try:
+            result_rows: list[dict] | None = None
             with engine.begin() as connection:
                 apply_work_schema(connection)
-                connection.execute(text(artifact.code))
+                statements = [s.strip() for s in sqlparse.split(artifact.code) if s.strip()]
+                last_result = None
+                for stmt in statements:
+                    last_result = connection.execute(text(stmt))
+                if last_result is not None and last_result.returns_rows:
+                    raw_rows = last_result.mappings().all()
+                    result_rows = [
+                        {k: _to_json_safe(v) for k, v in dict(row).items()}
+                        for row in raw_rows[:500]
+                    ]
 
+            row_msg = f" Получено строк: {len(result_rows)}." if result_rows else ""
             log.status = "success"
             log.finished_at = datetime.utcnow()
-            log.log_output = "SQL executed successfully"
+            log.log_output = f"SQL executed successfully.{row_msg}"
             db.commit()
             return RunResponse(
                 artifact_id=artifact.id,
                 status="success",
-                message="SQL выполнен успешно",
+                message=f"SQL выполнен успешно.{row_msg}",
                 airflow_run_id=None,
+                result_data=result_rows,
             )
         except Exception as exc:
             log.status = "error"
@@ -402,3 +488,141 @@ def get_artifact_logs(
         .all()
     )
     return [_serialize_log(log) for log in logs]
+
+
+@router.get("/api/schema", response_model=SchemaResponse)
+def get_schema() -> SchemaResponse:
+    inspector = SchemaInspector(settings.db_url, settings.work_db_schema)
+    try:
+        all_tables = inspector.get_all_tables()
+        schema_data: dict = {}
+        for table_name in all_tables:
+            columns = inspector.get_table_schema(table_name)
+            schema_data[table_name] = [
+                SchemaTableColumn(
+                    column=col["column"],
+                    type=col["type"],
+                    nullable=col["nullable"],
+                )
+                for col in columns
+            ]
+        return SchemaResponse(
+            schema_name=settings.work_db_schema or "public",
+            tables=schema_data,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Schema inspection error: {exc}") from exc
+
+
+@router.get("/api/stats", response_model=StatsResponse)
+def get_stats(db: Session = Depends(get_db)) -> StatsResponse:
+    total = db.query(func.count(ETLTask.id)).scalar() or 0
+    done = db.query(func.count(ETLTask.id)).filter(ETLTask.status == "done").scalar() or 0
+    error = db.query(func.count(ETLTask.id)).filter(ETLTask.status == "error").scalar() or 0
+    pending = (
+        db.query(func.count(ETLTask.id))
+        .filter(ETLTask.status.in_(["pending", "processing"]))
+        .scalar()
+        or 0
+    )
+
+    avg_attempts_row = db.query(func.avg(GeneratedArtifact.attempts)).scalar()
+    avg_attempts = round(float(avg_attempts_row), 2) if avg_attempts_row else 0.0
+
+    avg_time_row = (
+        db.query(func.avg(ETLTask.generation_time_ms))
+        .filter(ETLTask.generation_time_ms.isnot(None))
+        .scalar()
+    )
+    avg_time = round(float(avg_time_row), 1) if avg_time_row else None
+
+    pattern_rows = (
+        db.query(ETLTask.etl_pattern, func.count(ETLTask.id))
+        .filter(ETLTask.etl_pattern.isnot(None))
+        .group_by(ETLTask.etl_pattern)
+        .all()
+    )
+    patterns = {row[0]: row[1] for row in pattern_rows}
+
+    format_rows = (
+        db.query(ETLTask.output_format, func.count(ETLTask.id))
+        .group_by(ETLTask.output_format)
+        .all()
+    )
+    formats = {row[0]: row[1] for row in format_rows}
+
+    success_rate = round(done / total * 100, 1) if total > 0 else 0.0
+
+    return StatsResponse(
+        total_tasks=total,
+        done_tasks=done,
+        error_tasks=error,
+        pending_tasks=pending,
+        success_rate=success_rate,
+        avg_attempts=avg_attempts,
+        avg_generation_time_ms=avg_time,
+        patterns=patterns,
+        formats=formats,
+    )
+
+
+# ── CSV endpoints ─────────────────────────────────────────────────────────────
+
+@router.post("/api/csv/upload", response_model=CSVUploadResponse)
+async def upload_csv(
+    file: UploadFile = File(...),
+    table_name: str | None = None,
+) -> CSVUploadResponse:
+    """
+    Загрузить CSV-файл, очистить и нормализовать данные,
+    создать таблицу в etl_workspace для использования в ETL.
+    """
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Ожидается файл с расширением .csv")
+
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Файл пустой")
+
+    processor = CSVProcessor(settings.db_url, settings.work_db_schema)
+    try:
+        result = processor.process_and_load(
+            file_data=content,
+            desired_table_name=table_name,
+            original_filename=file.filename,
+            replace_if_exists=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Ошибка обработки CSV: {exc}") from exc
+
+    return CSVUploadResponse(
+        table_name=result.table_name,
+        schema_name=result.schema_name,
+        rows_loaded=result.rows_loaded,
+        columns=[
+            {"name": c["name"], "sql_type": c["sql_type"], "nullable": c["nullable"]}
+            for c in result.columns
+        ],
+        warnings=result.warnings,
+        replaced_existing=result.replaced_existing,
+    )
+
+
+@router.get("/api/csv/tables", response_model=list[CSVTableInfo])
+def list_csv_tables() -> list[CSVTableInfo]:
+    """Вернуть список всех таблиц в рабочей схеме etl_workspace."""
+    processor = CSVProcessor(settings.db_url, settings.work_db_schema)
+    try:
+        tables = processor.list_csv_tables()
+        return [
+            CSVTableInfo(
+                table_name=t["table_name"],
+                column_count=t["column_count"],
+                columns=t["columns"],
+            )
+            for t in tables
+        ]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Ошибка получения таблиц: {exc}") from exc

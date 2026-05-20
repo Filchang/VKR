@@ -11,6 +11,10 @@ class AirflowDeployer:
         self.base_url = settings.airflow_url
         self.auth = (settings.airflow_user, settings.airflow_password)
         self.dags_folder = settings.dags_folder
+        self.registration_timeout_seconds = settings.airflow_registration_timeout_seconds
+        self.registration_poll_interval_seconds = (
+            settings.airflow_registration_poll_interval_seconds
+        )
 
     @staticmethod
     def _build_error_message(exc: Exception) -> str:
@@ -19,7 +23,8 @@ class AirflowDeployer:
             return f"HTTP {response.status_code}: {response.text}"
         return str(exc)
 
-    def _wait_for_dag_registration(self, dag_id: str, timeout_seconds: int = 30) -> None:
+    def _wait_for_dag_registration(self, dag_id: str, timeout_seconds: int | None = None) -> None:
+        timeout_seconds = timeout_seconds or self.registration_timeout_seconds
         started_at = time.time()
         last_error: str | None = None
 
@@ -37,7 +42,7 @@ class AirflowDeployer:
                 return
             except Exception as exc:
                 last_error = self._build_error_message(exc)
-                time.sleep(2)
+                time.sleep(self.registration_poll_interval_seconds)
 
         raise RuntimeError(
             f"DAG {dag_id} was not registered in Airflow within {timeout_seconds}s. "

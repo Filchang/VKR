@@ -44,6 +44,33 @@ def apply_work_schema(connection) -> None:
     connection.exec_driver_sql(f"SET LOCAL search_path TO {search_path}")
 
 
+def _migrate_add_columns(connection) -> None:
+    """Add new columns to existing tables without breaking old deployments."""
+    if _is_sqlite_engine():
+        _sqlite_add_column(connection, "etl_tasks", "etl_pattern", "VARCHAR(30)")
+        _sqlite_add_column(connection, "etl_tasks", "generation_time_ms", "INTEGER")
+        _sqlite_add_column(connection, "etl_tasks", "dag_schedule", "VARCHAR(100)")
+        return
+
+    schema = settings.app_db_schema
+    tbl = f"{schema}.etl_tasks" if schema else "etl_tasks"
+    for col, typedef in [
+        ("etl_pattern", "VARCHAR(30)"),
+        ("generation_time_ms", "INTEGER"),
+        ("dag_schedule", "VARCHAR(100)"),
+    ]:
+        connection.execute(
+            text(f"ALTER TABLE IF EXISTS {tbl} ADD COLUMN IF NOT EXISTS {col} {typedef}")
+        )
+
+
+def _sqlite_add_column(connection, table: str, column: str, typedef: str) -> None:
+    try:
+        connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}"))
+    except Exception:
+        pass
+
+
 def init_db():
     if not _is_sqlite_engine():
         schemas_to_create = [settings.app_db_schema]
@@ -57,3 +84,6 @@ def init_db():
                 connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema_name}"))
 
     Base.metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        _migrate_add_columns(connection)

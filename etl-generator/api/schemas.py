@@ -1,7 +1,16 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+DAG_SCHEDULE_OPTIONS = {
+    "@once": "Однократно (вручную)",
+    "@hourly": "Каждый час",
+    "@daily": "Ежедневно",
+    "@weekly": "Еженедельно",
+    "@monthly": "Ежемесячно",
+}
 
 
 class GenerateRequest(BaseModel):
@@ -19,13 +28,22 @@ class GenerateRequest(BaseModel):
         default=None,
         description="Необязательный список таблиц-источников для ограничения схемы.",
     )
+    dag_schedule: str | None = Field(
+        default=None,
+        description=(
+            "Расписание Airflow DAG. Стандартные пресеты: @once, @hourly, @daily, @weekly, @monthly. "
+            "Также поддерживается произвольное cron-выражение (например '0 6 * * 1'). "
+            "Применяется только при output_format=airflow_dag."
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "task_description": "Собери ежедневную витрину заказов с агрегацией по пользователям.",
-                "output_format": "sql",
+                "output_format": "airflow_dag",
                 "source_tables": ["orders", "users"],
+                "dag_schedule": "@daily",
             }
         }
     )
@@ -34,13 +52,11 @@ class GenerateRequest(BaseModel):
 class GenerateResponse(BaseModel):
     """Ответ после постановки задачи в очередь на генерацию."""
 
-    task_id: int = Field(
-        ...,
-        description="Уникальный идентификатор созданной задачи.",
-    )
-    status: str = Field(
-        ...,
-        description="Начальный статус задачи после создания.",
+    task_id: int = Field(..., description="Уникальный идентификатор созданной задачи.")
+    status: str = Field(..., description="Начальный статус задачи после создания.")
+    etl_pattern: str | None = Field(
+        default=None,
+        description="Автоматически определённый ETL-паттерн.",
     )
 
     model_config = ConfigDict(
@@ -48,6 +64,7 @@ class GenerateResponse(BaseModel):
             "example": {
                 "task_id": 42,
                 "status": "pending",
+                "etl_pattern": "aggregation",
             }
         }
     )
@@ -72,31 +89,14 @@ class ArtifactResponse(BaseModel):
         description="Время создания артефакта.",
     )
 
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "id": 10,
-                "task_id": 42,
-                "artifact_type": "sql",
-                "code": "SELECT * FROM orders;",
-                "language": "sql",
-                "is_valid": True,
-                "validation_error": None,
-                "attempts": 1,
-                "created_at": "2026-04-25T14:30:00",
-            }
-        }
-    )
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TaskResponse(BaseModel):
     """Расширенное представление ETL-задачи с вложенными артефактами."""
 
     id: int = Field(..., description="Идентификатор задачи.")
-    created_at: datetime | None = Field(
-        default=None,
-        description="Время создания задачи.",
-    )
+    created_at: datetime | None = Field(default=None, description="Время создания задачи.")
     started_at: datetime | None = Field(
         default=None,
         description="Время начала обработки задачи.",
@@ -112,38 +112,20 @@ class TaskResponse(BaseModel):
         default=None,
         description="Текст ошибки, если задача завершилась неуспешно.",
     )
+    etl_pattern: str | None = Field(
+        default=None,
+        description="Определённый ETL-паттерн (aggregation, incremental, scd2, и др.).",
+    )
+    generation_time_ms: int | None = Field(
+        default=None,
+        description="Время генерации артефакта в миллисекундах.",
+    )
     artifacts: list[ArtifactResponse] = Field(
         default_factory=list,
         description="Список связанных с задачей артефактов.",
     )
 
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "id": 42,
-                "created_at": "2026-04-25T14:28:00",
-                "started_at": "2026-04-25T14:28:02",
-                "task_description": "Построй витрину ежедневных продаж.",
-                "output_format": "python",
-                "status": "done",
-                "source_tables": ["orders", "payments"],
-                "error_message": None,
-                "artifacts": [
-                    {
-                        "id": 10,
-                        "task_id": 42,
-                        "artifact_type": "python",
-                        "code": "import pandas as pd",
-                        "language": "python",
-                        "is_valid": True,
-                        "validation_error": None,
-                        "attempts": 1,
-                        "created_at": "2026-04-25T14:30:00",
-                    }
-                ],
-            }
-        }
-    )
+    model_config = ConfigDict(from_attributes=True)
 
 
 class RunResponse(BaseModel):
@@ -159,14 +141,19 @@ class RunResponse(BaseModel):
         default=None,
         description="Идентификатор запуска DAG в Airflow, если применимо.",
     )
+    result_data: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Строки результата SQL-запроса (для запросов, возвращающих данные). Максимум 500 строк.",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "artifact_id": 10,
                 "status": "success",
-                "message": None,
-                "airflow_run_id": "manual__2026-04-25T14:45:00.000000",
+                "message": "SQL выполнен успешно. Получено строк: 3.",
+                "airflow_run_id": None,
+                "result_data": [{"order_id": 1, "total": "1500.00"}],
             }
         }
     )
@@ -177,10 +164,7 @@ class ExecutionLogResponse(BaseModel):
 
     id: int = Field(..., description="Идентификатор записи лога.")
     artifact_id: int = Field(..., description="Идентификатор артефакта.")
-    started_at: datetime | None = Field(
-        default=None,
-        description="Время начала выполнения.",
-    )
+    started_at: datetime | None = Field(default=None, description="Время начала выполнения.")
     finished_at: datetime | None = Field(
         default=None,
         description="Время завершения выполнения.",
@@ -195,16 +179,72 @@ class ExecutionLogResponse(BaseModel):
         description="Идентификатор запуска Airflow DAG, если применимо.",
     )
 
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SchemaTableColumn(BaseModel):
+    column: str
+    type: str
+    nullable: bool
+
+
+class SchemaResponse(BaseModel):
+    """Схема базы данных рабочего пространства."""
+
+    schema_name: str
+    tables: dict[str, list[SchemaTableColumn]]
+
+
+class StatsResponse(BaseModel):
+    """Агрегированная статистика системы генерации ETL."""
+
+    total_tasks: int
+    done_tasks: int
+    error_tasks: int
+    pending_tasks: int
+    success_rate: float
+    avg_attempts: float
+    avg_generation_time_ms: float | None
+    patterns: dict[str, int]
+    formats: dict[str, int]
+
+
+# ── CSV ──────────────────────────────────────────────────────────────────────
+
+class CSVColumnInfo(BaseModel):
+    name: str
+    sql_type: str
+    nullable: bool
+
+
+class CSVUploadResponse(BaseModel):
+    """Результат загрузки и обработки CSV-файла."""
+
+    table_name: str
+    schema_name: str
+    rows_loaded: int
+    columns: list[CSVColumnInfo]
+    warnings: list[str] = Field(default_factory=list)
+    replaced_existing: bool = False
+
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "id": 5,
-                "artifact_id": 10,
-                "started_at": "2026-04-25T14:45:00",
-                "finished_at": "2026-04-25T14:46:10",
-                "status": "success",
-                "log_output": "SQL executed successfully",
-                "airflow_run_id": None,
+                "table_name": "sales_2026",
+                "schema_name": "etl_workspace",
+                "rows_loaded": 1540,
+                "columns": [
+                    {"name": "order_id", "sql_type": "BIGINT", "nullable": False},
+                    {"name": "amount", "sql_type": "DOUBLE PRECISION", "nullable": True},
+                ],
+                "warnings": ["Удалено 3 дублирующихся строк."],
+                "replaced_existing": True,
             }
         }
     )
+
+
+class CSVTableInfo(BaseModel):
+    table_name: str
+    column_count: int
+    columns: list[dict]

@@ -30,6 +30,9 @@ class ETLTask(Base):
     status: Mapped[str] = mapped_column(String(20))
     source_tables: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    etl_pattern: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    generation_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    dag_schedule: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
 class GeneratedArtifact(Base):

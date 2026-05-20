@@ -5,8 +5,14 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      AIRFLOW_URL: http://airflow-webserver:8080
+      AIRFLOW_USER: admin
+      AIRFLOW_PASSWORD: admin
+      DAGS_FOLDER: /app/dags
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     volumes:
       - ./dags:/app/dags
 
@@ -20,6 +26,10 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "etl", "-d", "etldb"]
+      interval: 5s
+      retries: 10
 
   pgadmin:
     image: dpage/pgadmin4:8
@@ -34,30 +44,49 @@ services:
   airflow-init:
     image: apache/airflow:2.8.0
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://etl:etl@postgres:5432/etldb
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY}
     volumes:
       - ./dags:/opt/airflow/dags
     command: >
-      bash -c "airflow db init &&
+      bash -c "airflow db migrate &&
       airflow users create
       --username admin
       --password admin
       --firstname Admin
       --lastname User
       --role Admin
-      --email admin@example.com"
+      --email admin@example.com &&
+      (airflow connections delete postgres_default || true) &&
+      airflow connections add postgres_default
+      --conn-type postgres
+      --conn-host postgres
+      --conn-login etl
+      --conn-password etl
+      --conn-schema etldb
+      --conn-port 5432"
 
   airflow-webserver:
     image: apache/airflow:2.8.0
     depends_on:
-      - postgres
-      - airflow-init
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://etl:etl@postgres:5432/etldb
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY}
     ports:
       - "8080:8080"
     volumes:
@@ -67,11 +96,19 @@ services:
   airflow-scheduler:
     image: apache/airflow:2.8.0
     depends_on:
-      - postgres
-      - airflow-init
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://etl:etl@postgres:5432/etldb
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY}
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: 5
+      AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: 5
     volumes:
       - ./dags:/opt/airflow/dags
     command: scheduler
